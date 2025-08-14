@@ -81,12 +81,65 @@ export default function TodoApp() {
     return () => subscription.unsubscribe()
   }, [])
 
-  // 当用户状态变化时获取todos
+  // 当用户状态变化时获取todos并设置实时订阅
   useEffect(() => {
+    let realtimeSubscription: any = null
+
     if (user) {
+      // 获取初始数据
       fetchTodos()
+
+      // 设置实时订阅
+      realtimeSubscription = supabase
+        .channel('todos_changes')
+        .on(
+          'postgres_changes',
+          {
+            event: '*', // 监听所有变更事件 (INSERT, UPDATE, DELETE)
+            schema: 'public',
+            table: 'todos',
+            filter: `user_id=eq.${user.id}` // 只监听当前用户的数据变更
+          },
+          (payload) => {
+            console.log('Real-time change received:', payload)
+            handleRealtimeChange(payload)
+          }
+        )
+        .subscribe()
+    }
+
+    // 清理函数
+    return () => {
+      if (realtimeSubscription) {
+        supabase.removeChannel(realtimeSubscription)
+      }
     }
   }, [user])
+
+  // 处理实时数据变更
+  const handleRealtimeChange = (payload: any) => {
+    const { eventType, new: newRecord, old: oldRecord } = payload
+
+    switch (eventType) {
+      case 'INSERT':
+        // 新增todo
+        setTodos((currentTodos) => [newRecord, ...currentTodos])
+        break
+
+      case 'UPDATE':
+        // 更新todo
+        setTodos((currentTodos) => currentTodos.map((todo) => (todo.id === newRecord.id ? newRecord : todo)))
+        break
+
+      case 'DELETE':
+        // 删除todo
+        setTodos((currentTodos) => currentTodos.filter((todo) => todo.id !== oldRecord.id))
+        break
+
+      default:
+        break
+    }
+  }
 
   const handleSignOut = async () => {
     await supabase.auth.signOut()
@@ -97,25 +150,20 @@ export default function TodoApp() {
     if (!inputValue.trim() || !user) return
 
     try {
-      const { data, error } = await supabase
-        .from('todos')
-        .insert([
-          {
-            user_id: user.id,
-            text: inputValue.trim(),
-            completed: false
-          }
-        ])
-        .select()
-        .single()
+      const { error } = await supabase.from('todos').insert([
+        {
+          user_id: user.id,
+          text: inputValue.trim(),
+          completed: false
+        }
+      ])
 
       if (error) {
         console.error('Error adding todo:', error)
         return
       }
 
-      // 将新todo添加到状态中
-      setTodos([data, ...todos])
+      // 清空输入框，实时订阅会自动更新todos状态
       setInputValue('')
     } catch (error) {
       console.error('Error adding todo:', error)
@@ -137,8 +185,7 @@ export default function TodoApp() {
         return
       }
 
-      // 更新本地状态
-      setTodos(todos.map((t) => (t.id === id ? { ...t, completed: !t.completed } : t)))
+      // 实时订阅会自动更新todos状态，无需手动更新
     } catch (error) {
       console.error('Error updating todo:', error)
     }
@@ -156,8 +203,7 @@ export default function TodoApp() {
         return
       }
 
-      // 从本地状态中移除
-      setTodos(todos.filter((todo) => todo.id !== id))
+      // 实时订阅会自动更新todos状态，无需手动更新
     } catch (error) {
       console.error('Error deleting todo:', error)
     }

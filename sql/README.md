@@ -50,9 +50,24 @@ SELECT * FROM pg_policies WHERE tablename = 'todos';
 2. 尝试插入一条todo记录
 3. 验证只能看到自己的记录
 
+## 实时功能
+
+该应用已启用Supabase实时功能，支持多设备间的数据同步：
+
+### 实时特性
+- **自动同步**: 用户在任何设备上的操作（增加、修改、删除）都会实时同步到其他设备
+- **用户隔离**: 只会接收到当前用户自己的数据变更，不会看到其他用户的操作
+- **事件监听**: 监听所有数据库变更事件（INSERT、UPDATE、DELETE）
+
+### 实现原理
+1. 通过 `ALTER PUBLICATION supabase_realtime ADD TABLE todos;` 启用表的实时功能
+2. 前端订阅特定用户的数据变更：`filter: user_id=eq.${user.id}`
+3. 自动处理实时事件并更新本地状态
+
 ## 注意事项
 
 - 所有的RLS策略都基于 `auth.uid()` 函数，确保用户已通过Supabase认证
 - `user_id` 字段通过外键约束关联到 `auth.users` 表
 - 当用户被删除时，其所有的todos也会被级联删除
 - `updated_at` 字段会在每次更新记录时自动更新为当前时间
+- **实时功能**: 需要确保Supabase项目已启用实时功能，并执行了实时发布命令

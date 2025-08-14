@@ -45,3 +45,6 @@ CREATE TRIGGER update_todos_updated_at
   BEFORE UPDATE ON todos 
   FOR EACH ROW 
   EXECUTE FUNCTION update_updated_at_column();
+
+-- 启用实时功能
+ALTER PUBLICATION supabase_realtime ADD TABLE todos;
