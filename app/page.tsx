@@ -4,16 +4,18 @@ import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card } from '@/components/ui/card'
-import { Plus, Trash2, CheckCircle2, Circle, Sparkles, Target, Zap, LogOut } from 'lucide-react'
+import { Plus, Trash2, CheckCircle2, Circle, Sparkles, Target, Zap, LogOut, Loader2 } from 'lucide-react'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import { User } from '@supabase/supabase-js'
 
 interface Todo {
-  id: number
+  id: string
+  user_id: string
   text: string
   completed: boolean
-  createdAt: Date
+  created_at: string
+  updated_at: string
 }
 
 export default function TodoApp() {
@@ -21,10 +23,36 @@ export default function TodoApp() {
   const [inputValue, setInputValue] = useState('')
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
+  const [todosLoading, setTodosLoading] = useState(false)
+
+  const supabase = createClient()
+
+  // 获取用户的todos
+  const fetchTodos = async () => {
+    if (!user) return
+
+    setTodosLoading(true)
+    try {
+      const { data, error } = await supabase
+        .from('todos')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+
+      if (error) {
+        console.error('Error fetching todos:', error)
+        return
+      }
+
+      setTodos(data || [])
+    } catch (error) {
+      console.error('Error fetching todos:', error)
+    } finally {
+      setTodosLoading(false)
+    }
+  }
 
   useEffect(() => {
-    const supabase = createClient()
-
     // 获取当前用户
     const getUser = async () => {
       const {
@@ -41,35 +69,98 @@ export default function TodoApp() {
       data: { subscription }
     } = supabase.auth.onAuthStateChange((event, session) => {
       setUser(session?.user ?? null)
+      if (session?.user) {
+        // 用户登录后获取todos
+        fetchTodos()
+      } else {
+        // 用户登出后清空todos
+        setTodos([])
+      }
     })
 
     return () => subscription.unsubscribe()
   }, [])
 
+  // 当用户状态变化时获取todos
+  useEffect(() => {
+    if (user) {
+      fetchTodos()
+    }
+  }, [user])
+
   const handleSignOut = async () => {
-    const supabase = createClient()
     await supabase.auth.signOut()
   }
 
-  const addTodo = () => {
-    if (inputValue.trim()) {
-      const newTodo: Todo = {
-        id: Date.now(),
-        text: inputValue.trim(),
-        completed: false,
-        createdAt: new Date()
+  // 添加新的todo
+  const addTodo = async () => {
+    if (!inputValue.trim() || !user) return
+
+    try {
+      const { data, error } = await supabase
+        .from('todos')
+        .insert([
+          {
+            user_id: user.id,
+            text: inputValue.trim(),
+            completed: false
+          }
+        ])
+        .select()
+        .single()
+
+      if (error) {
+        console.error('Error adding todo:', error)
+        return
       }
-      setTodos([newTodo, ...todos])
+
+      // 将新todo添加到状态中
+      setTodos([data, ...todos])
       setInputValue('')
+    } catch (error) {
+      console.error('Error adding todo:', error)
     }
   }
 
-  const toggleTodo = (id: number) => {
-    setTodos(todos.map((todo) => (todo.id === id ? { ...todo, completed: !todo.completed } : todo)))
+  // 切换todo完成状态
+  const toggleTodo = async (id: string) => {
+    if (!user) return
+
+    const todo = todos.find((t) => t.id === id)
+    if (!todo) return
+
+    try {
+      const { error } = await supabase.from('todos').update({ completed: !todo.completed }).eq('id', id).eq('user_id', user.id)
+
+      if (error) {
+        console.error('Error updating todo:', error)
+        return
+      }
+
+      // 更新本地状态
+      setTodos(todos.map((t) => (t.id === id ? { ...t, completed: !t.completed } : t)))
+    } catch (error) {
+      console.error('Error updating todo:', error)
+    }
   }
 
-  const deleteTodo = (id: number) => {
-    setTodos(todos.filter((todo) => todo.id !== id))
+  // 删除todo
+  const deleteTodo = async (id: string) => {
+    if (!user) return
+
+    try {
+      const { error } = await supabase.from('todos').delete().eq('id', id).eq('user_id', user.id)
+
+      if (error) {
+        console.error('Error deleting todo:', error)
+        return
+      }
+
+      // 从本地状态中移除
+      setTodos(todos.filter((todo) => todo.id !== id))
+    } catch (error) {
+      console.error('Error deleting todo:', error)
+    }
   }
 
   const completedCount = todos.filter((todo) => todo.completed).length
@@ -119,33 +210,57 @@ export default function TodoApp() {
 
       {/* Main Content */}
       <div className="max-w-4xl mx-auto px-6 py-12">
-        {/* Add Task Section */}
-        <Card className="p-8 mb-8 border-0 shadow-xl bg-white/80 backdrop-blur-sm">
-          <div className="flex items-center gap-4">
-            <div className="flex-1 relative">
-              <Input
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                placeholder="What's next on your list?"
-                className="text-lg py-6 px-6 border-2 border-gray-200 focus:border-cyan-500 rounded-xl font-sans"
-                onKeyPress={(e) => e.key === 'Enter' && addTodo()}
-              />
-              <Zap className="absolute right-4 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+        {/* Add Task Section - 只有登录用户才能看到 */}
+        {user && (
+          <Card className="p-8 mb-8 border-0 shadow-xl bg-white/80 backdrop-blur-sm">
+            <div className="flex items-center gap-4">
+              <div className="flex-1 relative">
+                <Input
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  placeholder="What's next on your list?"
+                  className="text-lg py-6 px-6 border-2 border-gray-200 focus:border-cyan-500 rounded-xl font-sans"
+                  onKeyPress={(e) => e.key === 'Enter' && addTodo()}
+                  disabled={todosLoading}
+                />
+                <Zap className="absolute right-4 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+              </div>
+              <Button
+                onClick={addTodo}
+                size="lg"
+                className="px-8 py-6 bg-gradient-to-r from-cyan-600 to-cyan-700 hover:from-cyan-700 hover:to-cyan-800 text-white rounded-xl shadow-lg hover:shadow-xl transition-all duration-200 font-sans"
+                disabled={!inputValue.trim() || todosLoading}
+              >
+                <Plus className="w-5 h-5 mr-2" />
+                Add Task
+              </Button>
             </div>
-            <Button
-              onClick={addTodo}
-              size="lg"
-              className="px-8 py-6 bg-gradient-to-r from-cyan-600 to-cyan-700 hover:from-cyan-700 hover:to-cyan-800 text-white rounded-xl shadow-lg hover:shadow-xl transition-all duration-200 font-sans"
-            >
-              <Plus className="w-5 h-5 mr-2" />
-              Add Task
-            </Button>
-          </div>
-        </Card>
+          </Card>
+        )}
 
         {/* Tasks List */}
         <div className="space-y-4">
-          {todos.length === 0 ? (
+          {!user ? (
+            <Card className="p-12 text-center border-0 shadow-lg bg-white/60 backdrop-blur-sm">
+              <div className="space-y-4">
+                <div className="w-16 h-16 mx-auto bg-gradient-to-br from-cyan-100 to-amber-100 rounded-full flex items-center justify-center">
+                  <Target className="w-8 h-8 text-cyan-600" />
+                </div>
+                <h3 className="text-xl font-semibold text-gray-700 font-sans">Welcome to TodoList!</h3>
+                <p className="text-gray-500 font-sans">Please login to start managing your todos</p>
+              </div>
+            </Card>
+          ) : todosLoading ? (
+            <Card className="p-12 text-center border-0 shadow-lg bg-white/60 backdrop-blur-sm">
+              <div className="space-y-4">
+                <div className="w-16 h-16 mx-auto bg-gradient-to-br from-cyan-100 to-amber-100 rounded-full flex items-center justify-center">
+                  <Loader2 className="w-8 h-8 text-cyan-600 animate-spin" />
+                </div>
+                <h3 className="text-xl font-semibold text-gray-700 font-sans">Loading your todos...</h3>
+                <p className="text-gray-500 font-sans">Please wait while we fetch your tasks</p>
+              </div>
+            </Card>
+          ) : todos.length === 0 ? (
             <Card className="p-12 text-center border-0 shadow-lg bg-white/60 backdrop-blur-sm">
               <div className="space-y-4">
                 <div className="w-16 h-16 mx-auto bg-gradient-to-br from-cyan-100 to-amber-100 rounded-full flex items-center justify-center">
@@ -189,7 +304,7 @@ export default function TodoApp() {
                       {todo.text}
                     </p>
                     <p className="text-sm text-gray-400 mt-1 font-sans">
-                      {todo.createdAt.toLocaleDateString('zh-CN', {
+                      {new Date(todo.created_at).toLocaleDateString('zh-CN', {
                         year: 'numeric',
                         month: 'short',
                         day: 'numeric',
@@ -214,7 +329,7 @@ export default function TodoApp() {
         </div>
 
         {/* Progress Section */}
-        {todos.length > 0 && (
+        {user && todos.length > 0 && (
           <Card className="mt-8 p-6 border-0 shadow-lg bg-gradient-to-r from-amber-50 to-orange-50">
             <div className="flex items-center justify-between">
               <div>
@@ -226,7 +341,6 @@ export default function TodoApp() {
               <div className="text-right">
                 <div className="text-2xl font-bold text-amber-600">
                   {totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0}%
-
                 </div>
                 <div className="w-24 h-2 bg-gray-200 rounded-full mt-2">
                   <div
