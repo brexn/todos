@@ -1,10 +1,13 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card } from '@/components/ui/card'
-import { Plus, Trash2, CheckCircle2, Circle, Sparkles, Target, Zap } from 'lucide-react'
+import { Plus, Trash2, CheckCircle2, Circle, Sparkles, Target, Zap, LogOut } from 'lucide-react'
+import Link from 'next/link'
+import { createClient } from '@/lib/supabase/client'
+import { User } from '@supabase/supabase-js'
 
 interface Todo {
   id: number
@@ -16,6 +19,37 @@ interface Todo {
 export default function TodoApp() {
   const [todos, setTodos] = useState<Todo[]>([])
   const [inputValue, setInputValue] = useState('')
+  const [user, setUser] = useState<User | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const supabase = createClient()
+
+    // 获取当前用户
+    const getUser = async () => {
+      const {
+        data: { user }
+      } = await supabase.auth.getUser()
+      setUser(user)
+      setLoading(false)
+    }
+
+    getUser()
+
+    // 监听认证状态变化
+    const {
+      data: { subscription }
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      setUser(session?.user ?? null)
+    })
+
+    return () => subscription.unsubscribe()
+  }, [])
+
+  const handleSignOut = async () => {
+    const supabase = createClient()
+    await supabase.auth.signOut()
+  }
 
   const addTodo = () => {
     if (inputValue.trim()) {
@@ -43,6 +77,46 @@ export default function TodoApp() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-cyan-50 via-white to-amber-50">
+      {/* Navigation Header */}
+      <div className="bg-white/80 backdrop-blur-sm border-b border-gray-200 shadow-sm">
+        <div className="max-w-4xl mx-auto px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Target className="w-6 h-6 text-cyan-600" />
+              <h1 className="text-xl font-bold text-gray-800 font-sans">todo list</h1>
+            </div>
+            <div className="flex gap-3">
+              {!loading && (
+                <>
+                  {user ? (
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm text-gray-600 font-sans">{user.email}</span>
+                      <Button onClick={handleSignOut} size="sm" variant="outline" className="font-sans">
+                        <LogOut className="w-4 h-4 mr-1" />
+                        Logout
+                      </Button>
+                    </div>
+                  ) : (
+                    <>
+                      <Button asChild size="sm" variant="outline" className="font-sans">
+                        <Link href="/auth/login">Login</Link>
+                      </Button>
+                      <Button
+                        asChild
+                        size="sm"
+                        className="bg-gradient-to-r from-cyan-600 to-cyan-700 hover:from-cyan-700 hover:to-cyan-800 text-white font-sans"
+                      >
+                        <Link href="/auth/sign-up">Sign up</Link>
+                      </Button>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Main Content */}
       <div className="max-w-4xl mx-auto px-6 py-12">
         {/* Add Task Section */}
@@ -152,6 +226,7 @@ export default function TodoApp() {
               <div className="text-right">
                 <div className="text-2xl font-bold text-amber-600">
                   {totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0}%
+
                 </div>
                 <div className="w-24 h-2 bg-gray-200 rounded-full mt-2">
                   <div
