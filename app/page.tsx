@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card } from '@/components/ui/card'
@@ -25,10 +25,30 @@ export default function TodoApp() {
   const [loading, setLoading] = useState(true)
   const [todosLoading, setTodosLoading] = useState(false)
 
+  // 用于跟踪本地操作的ref，避免实时订阅重复处理
+  const localOperations = useRef<Set<string>>(new Set())
+
+  // 创建supabase客户端实例
   const supabase = createClient()
 
-  // 获取用户的todos
-  const fetchTodos = async () => {
+  // 添加本地操作追踪
+  const addLocalOperation = (id: string, operation: string) => {
+    const operationKey = `${operation}_${id}`
+    localOperations.current.add(operationKey)
+    // 5秒后移除追踪，避免内存泄漏
+    setTimeout(() => {
+      localOperations.current.delete(operationKey)
+    }, 5000)
+  }
+
+  // 检查是否是本地操作
+  const isLocalOperation = (id: string, operation: string) => {
+    const operationKey = `${operation}_${id}`
+    return localOperations.current.has(operationKey)
+  }
+
+  // 获取用户的todos - 使用useCallback避免不必要的重新创建
+  const fetchTodos = useCallback(async () => {
     if (!user) return
 
     setTodosLoading(true)
@@ -50,7 +70,7 @@ export default function TodoApp() {
     } finally {
       setTodosLoading(false)
     }
-  }
+  }, [user])
 
   useEffect(() => {
     // 获取当前用户
@@ -83,15 +103,15 @@ export default function TodoApp() {
 
   // 当用户状态变化时获取todos并设置实时订阅
   useEffect(() => {
-    let realtimeSubscription: any = null
+    let channel: any = null
 
     if (user) {
       // 获取初始数据
       fetchTodos()
 
       // 设置实时订阅
-      realtimeSubscription = supabase
-        .channel('todos_changes')
+      channel = supabase
+        .channel(`todos_${user.id}`) // 为每个用户创建唯一的频道
         .on(
           'postgres_changes',
           {
@@ -105,38 +125,88 @@ export default function TodoApp() {
             handleRealtimeChange(payload)
           }
         )
-        .subscribe()
+        .subscribe((status) => {
+          console.log('Subscription status:', status)
+        })
     }
 
     // 清理函数
     return () => {
-      if (realtimeSubscription) {
-        supabase.removeChannel(realtimeSubscription)
+      if (channel) {
+        console.log('Cleaning up realtime subscription')
+        supabase.removeChannel(channel)
       }
     }
-  }, [user])
+  }, [user?.id, fetchTodos])
 
-  // 处理实时数据变更
+  // 处理实时数据变更 - 只处理来自其他设备/会话的变更
   const handleRealtimeChange = (payload: any) => {
+    console.log('Processing realtime change:', payload)
     const { eventType, new: newRecord, old: oldRecord } = payload
 
     switch (eventType) {
       case 'INSERT':
-        // 新增todo
-        setTodos((currentTodos) => [newRecord, ...currentTodos])
+        // 检查是否是本地操作
+        if (isLocalOperation(newRecord.id, 'INSERT')) {
+          console.log('Skipping INSERT - local operation detected')
+          return
+        }
+        
+        // 只添加不存在的todo（来自其他设备）
+        setTodos((currentTodos) => {
+          const exists = currentTodos.find(todo => todo.id === newRecord.id)
+          if (exists) {
+            console.log('Todo already exists, skipping INSERT')
+            return currentTodos
+          }
+          console.log('Adding new todo from realtime:', newRecord)
+          return [newRecord, ...currentTodos]
+        })
         break
 
       case 'UPDATE':
+        // 检查是否是本地操作
+        if (isLocalOperation(newRecord.id, 'UPDATE')) {
+          console.log('Skipping UPDATE - local operation detected')
+          return
+        }
+        
         // 更新todo
-        setTodos((currentTodos) => currentTodos.map((todo) => (todo.id === newRecord.id ? newRecord : todo)))
+        setTodos((currentTodos) => {
+          const existingTodo = currentTodos.find(todo => todo.id === newRecord.id)
+          if (!existingTodo) {
+            console.log('Todo not found for update, skipping')
+            return currentTodos
+          }
+
+          console.log('Updating todo from realtime:', newRecord)
+          return currentTodos.map((todo) =>
+            todo.id === newRecord.id ? newRecord : todo
+          )
+        })
         break
 
       case 'DELETE':
+        // 检查是否是本地操作
+        if (isLocalOperation(oldRecord.id, 'DELETE')) {
+          console.log('Skipping DELETE - local operation detected')
+          return
+        }
+        
         // 删除todo
-        setTodos((currentTodos) => currentTodos.filter((todo) => todo.id !== oldRecord.id))
+        setTodos((currentTodos) => {
+          const exists = currentTodos.find(todo => todo.id === oldRecord.id)
+          if (!exists) {
+            console.log('Todo not found for delete, skipping')
+            return currentTodos
+          }
+          console.log('Deleting todo from realtime:', oldRecord)
+          return currentTodos.filter((todo) => todo.id !== oldRecord.id)
+        })
         break
 
       default:
+        console.log('Unknown event type:', eventType)
         break
     }
   }
@@ -149,24 +219,55 @@ export default function TodoApp() {
   const addTodo = async () => {
     if (!inputValue.trim() || !user) return
 
+    // 创建临时todo用于乐观更新
+    const tempTodo: Todo = {
+      id: `temp_${Date.now()}`, // 临时ID
+      user_id: user.id,
+      text: inputValue.trim(),
+      completed: false,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }
+
+    // 立即更新本地UI（乐观更新）
+    setTodos(prevTodos => [tempTodo, ...prevTodos])
+    setInputValue('')
+
     try {
-      const { error } = await supabase.from('todos').insert([
-        {
-          user_id: user.id,
-          text: inputValue.trim(),
-          completed: false
-        }
-      ])
+      const { data, error } = await supabase
+        .from('todos')
+        .insert([
+          {
+            user_id: user.id,
+            text: tempTodo.text,
+            completed: false
+          }
+        ])
+        .select()
+        .single()
 
       if (error) {
         console.error('Error adding todo:', error)
+        // 如果失败，移除临时todo
+        setTodos(prevTodos => prevTodos.filter(todo => todo.id !== tempTodo.id))
+        setInputValue(tempTodo.text) // 恢复输入框内容
         return
       }
 
-      // 清空输入框，实时订阅会自动更新todos状态
-      setInputValue('')
+      // 成功后，用真实数据替换临时数据
+      setTodos(prevTodos => 
+        prevTodos.map(todo => 
+          todo.id === tempTodo.id ? data : todo
+        )
+      )
+      
+      // 追踪本地操作
+      addLocalOperation(data.id, 'INSERT')
     } catch (error) {
       console.error('Error adding todo:', error)
+      // 如果失败，移除临时todo
+      setTodos(prevTodos => prevTodos.filter(todo => todo.id !== tempTodo.id))
+      setInputValue(tempTodo.text) // 恢复输入框内容
     }
   }
 
@@ -177,17 +278,41 @@ export default function TodoApp() {
     const todo = todos.find((t) => t.id === id)
     if (!todo) return
 
+    // 立即更新本地UI（乐观更新）
+    setTodos(prevTodos =>
+      prevTodos.map((t) =>
+        t.id === id ? { ...t, completed: !t.completed } : t
+      )
+    )
+
     try {
-      const { error } = await supabase.from('todos').update({ completed: !todo.completed }).eq('id', id).eq('user_id', user.id)
+      const { error } = await supabase
+        .from('todos')
+        .update({ completed: !todo.completed })
+        .eq('id', id)
+        .eq('user_id', user.id)
 
       if (error) {
         console.error('Error updating todo:', error)
+        // 如果失败，恢复原始状态
+        setTodos(prevTodos =>
+          prevTodos.map((t) =>
+            t.id === id ? { ...t, completed: todo.completed } : t
+          )
+        )
         return
       }
-
-      // 实时订阅会自动更新todos状态，无需手动更新
+      
+      // 追踪本地操作
+      addLocalOperation(id, 'UPDATE')
     } catch (error) {
       console.error('Error updating todo:', error)
+      // 如果失败，恢复原始状态
+      setTodos(prevTodos =>
+        prevTodos.map((t) =>
+          t.id === id ? { ...t, completed: todo.completed } : t
+        )
+      )
     }
   }
 
@@ -195,17 +320,33 @@ export default function TodoApp() {
   const deleteTodo = async (id: string) => {
     if (!user) return
 
+    // 保存要删除的todo用于错误恢复
+    const todoToDelete = todos.find(t => t.id === id)
+    if (!todoToDelete) return
+
+    // 立即从UI中移除（乐观更新）
+    setTodos(prevTodos => prevTodos.filter(todo => todo.id !== id))
+
     try {
-      const { error } = await supabase.from('todos').delete().eq('id', id).eq('user_id', user.id)
+      const { error } = await supabase
+        .from('todos')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', user.id)
 
       if (error) {
         console.error('Error deleting todo:', error)
+        // 如果失败，恢复删除的todo
+        setTodos(prevTodos => [todoToDelete, ...prevTodos])
         return
       }
-
-      // 实时订阅会自动更新todos状态，无需手动更新
+      
+      // 追踪本地操作
+      addLocalOperation(id, 'DELETE')
     } catch (error) {
       console.error('Error deleting todo:', error)
+      // 如果失败，恢复删除的todo
+      setTodos(prevTodos => [todoToDelete, ...prevTodos])
     }
   }
 
